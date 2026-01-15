@@ -1,6 +1,8 @@
+import 'package:aircraft_simulator/core/di/init_di.dart';
 import 'package:flutter/material.dart';
 
 void main() {
+  configureDependencies();
   runApp(const MyApp());
 }
 
