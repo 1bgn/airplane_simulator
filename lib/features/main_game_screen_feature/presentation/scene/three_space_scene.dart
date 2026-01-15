@@ -46,7 +46,11 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
 
   // Turn rate (rad/s at full deflection)
   final double yawRate = 1.4;
+// Camera: strictly behind current forward vector
 
+
+// NEW: side offset (positive => left)
+  final double followLeft = 28.0;
   // Bank (roll) animation
   final double maxBankDeg = 18.0;     // max tilt
   final double bankSmooth = 0.12;     // 0..1 per frame-like smoothing
@@ -124,16 +128,23 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     pos.needsUpdate = true;
     geo.computeVertexNormals();
 
+    geo.computeBoundingBox();
+    geo.computeBoundingSphere(); // [web:131]
+
     final mat = three.MeshStandardMaterial.fromMap({
-      'color': 0x556644,
+      'color': 0x2ECC71,
       'roughness': 1.0,
       'metalness': 0.0,
     });
 
     final mesh = three.Mesh(geo, mat);
-    mesh.receiveShadow = true;
+
+    // Если всё равно будет пропадать — просто отключи frustum culling для террейна
+    mesh.frustumCulled = false; // [web:124]
+
     return mesh;
   }
+
 
   double _wrap(double v, double min, double max) {
     final range = max - min;
@@ -157,7 +168,8 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
 
     // Scene
     threeJs.scene = three.Scene();
-    threeJs.scene.background = three.Color.fromHex32(0x87B6FF);
+    threeJs.scene.background = three.Color.fromHex32(0x4A90E2);
+
 
     // Controls: locked (camera fully driven by code)
     controls = OrbitControls(threeJs.camera, threeJs.globalKey)
@@ -232,12 +244,13 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
       final targetBank = (-_yawInput * (maxBankDeg * math.pi / 180.0));
       _bank = _lerp(_bank, targetBank, bankSmooth);
       airplaneModel!.rotation.z = _bank;
-
+      final lx = _tmpForward.z;
+      final lz = -_tmpForward.x;
       // 7) Camera strictly behind (relative to forward)
       threeJs.camera.position.setValues(
-        airplaneRig!.position.x - _tmpForward.x * followBack,
+        airplaneRig!.position.x - _tmpForward.x * followBack + lx * followLeft,
         airplaneRig!.position.y + followUp,
-        airplaneRig!.position.z - _tmpForward.z * followBack,
+        airplaneRig!.position.z - _tmpForward.z * followBack + lz * followLeft,
       );
 
       controls!.target.setValues(
