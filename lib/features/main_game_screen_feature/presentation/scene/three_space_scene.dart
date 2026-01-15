@@ -13,40 +13,44 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
   late three.ThreeJS threeJs;
   three.Joystick? joystick;
 
-  // Earth: use a pivot so we can re-center the model without losing world position
   final three.Object3D earthPivot = three.Object3D();
-  three.Object3D? earthRoot; // loaded glTF scene (multi-object)
-
+  three.Object3D? earthRoot;
   three.Object3D? plane;
 
   // Debug
   double _dbgAcc = 0.0;
 
-  // Planet center is the pivot's world position
   final three.Vector3 planetCenter = three.Vector3(0, 0, 0);
 
-  // Orbit parameters
-  final double orbitRadius = 380.0; // подгони под размер планеты
-  final double altitude = 120.0;    // фикс высота над центром (Y)
-  double orbitAngle = 0.0;
-  double orbitAngularSpeed = 0.35;
+  final double planetRadius = 380.0;
+  final double altitude = 120.0;
+
+  // Great-circle orbit axis (normal of orbit plane).
+  // X axis => orbit plane is YZ, so you pass through north/south poles.
+  final three.Vector3 orbitAxis = three.Vector3(1, 0, 0);
+
+  // Vector from center to plane (rotated around orbitAxis each frame)
+  final three.Vector3 posVec = three.Vector3(0, 1, 0);
+
+  double orbitAngularSpeed = 0.8;
 
   // Plane visuals
   double planeBank = 0.0;
 
-  // Camera control (pitch only)
-  double camPitch = 0.25;
-  final double camPitchMin = -0.2;
-  final double camPitchMax = 0.9;
-
-  // Camera follow tuning
+  // Camera follow
   final double cameraDistance = 240.0;
   final double cameraHeight = 60.0;
   final double follow = 0.12;
-  final double lookAhead = 60.0;
+  final double lookAhead = 80.0;
 
   // Earth spin
   double earthSpin = 0.0;
+
+  // Temps
+  final three.Quaternion _q = three.Quaternion();
+  final three.Vector3 _up = three.Vector3(0, 1, 0);
+  final three.Vector3 _posNext = three.Vector3(0, 0, 0);
+  final three.Vector3 _target = three.Vector3(0, 0, 0);
 
   @override
   void initState() {
@@ -93,51 +97,38 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     sun.position.setValues(50, 80, 30);
     threeJs.scene.add(sun);
 
-    // Put planet pivot at world origin (the orbit center)
     earthPivot.position.setValues(planetCenter.x, planetCenter.y, planetCenter.z);
     threeJs.scene.add(earthPivot);
 
     final loader = three.GLTFLoader(flipY: true).setPath('assets/3d_models/');
 
-    // ---- Earth ----
     final earthGLB = await loader.fromAsset('earth.glb');
-    if (earthGLB == null) {
-      debugPrint('earth.glb not loaded');
-      return;
-    }
-
+    if (earthGLB == null) return;
     earthRoot = earthGLB.scene;
-
-    // Disable culling for all children (robustness for multi-object scenes). [web:160]
     earthRoot!.traverse((o) => o.frustumCulled = false);
 
-    // Compute geo center and re-center INSIDE the pivot. [web:160]
     final center = three.Vector3(0, 0, 0);
     final bbox = three.BoundingBox().setFromObject(earthRoot!);
     bbox.getCenter(center);
-
-    // Important: re-center by shifting the loaded root inside pivot,
-    // NOT by setting earthRoot.position afterwards.
     earthRoot!.position.setValues(-center.x, -center.y, -center.z);
-
-    // Attach to pivot
     earthPivot.add(earthRoot!);
 
-    // ---- Plane ----
     final planeGLB = await loader.fromAsset('airplane.glb');
-    if (planeGLB == null) {
-      debugPrint('airplane.glb not loaded');
-      return;
-    }
+    if (planeGLB == null) return;
     plane = planeGLB.scene;
     plane!.scale.setValues(1, 1, 1);
     threeJs.scene.add(plane!);
 
-    // Start
-    _setPlaneOnOrbit();
+    // init posVec length = R + alt (manual multiplyScalar)
+    posVec.normalize();
+    final r = planetRadius + altitude;
+    posVec.x *= r;
+    posVec.y *= r;
+    posVec.z *= r;
+
+    _applyTransforms(0.0);
     _snapCamera();
 
-    // Joystick overlay
     threeJs.renderer?.autoClear = false;
     if (joystick != null) {
       threeJs.postProcessor = ([double? dt]) {
@@ -155,53 +146,70 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     });
   }
 
-  void _setPlaneOnOrbit() {
+  void _applyTransforms(double dt) {
     final p = plane;
     if (p == null) return;
 
-    final x = planetCenter.x + math.cos(orbitAngle) * orbitRadius;
-    final z = planetCenter.z + math.sin(orbitAngle) * orbitRadius;
-    final y = planetCenter.y + altitude;
+    // Position
+    p.position.setValues(
+      planetCenter.x + posVec.x,
+      planetCenter.y + posVec.y,
+      planetCenter.z + posVec.z,
+    );
 
-    p.position.setValues(x, y, z);
-  }
+    // Up = radial
+    _up.setValues(posVec.x, posVec.y, posVec.z);
+    _up.normalize();
 
-  three.Vector3 _orbitTangentForward() {
-    final tx = -math.sin(orbitAngle);
-    final tz = math.cos(orbitAngle);
-    final v = three.Vector3(tx, 0, tz);
+    // Compute a stable "where we will be next", then look at that point.
+    // This avoids lookAt flipping near poles because direction is derived from motion, not from cross-products. [web:44][web:67]
+    _posNext.setValues(posVec.x, posVec.y, posVec.z);
+    final dAng = orbitAngularSpeed * (dt > 0 ? dt : 1 / 60.0);
+    _q.setFromAxisAngle(orbitAxis, dAng);
+    _posNext.applyQuaternion(_q);
 
-    final len = math.sqrt(v.x * v.x + v.z * v.z);
-    if (len > 1e-6) {
-      v.x /= len;
-      v.z /= len;
-    }
-    return v;
+    _target.setValues(
+      planetCenter.x + _posNext.x,
+      planetCenter.y + _posNext.y,
+      planetCenter.z + _posNext.z,
+    );
+
+    p.up.setValues(_up.x, _up.y, _up.z);
+    p.lookAt(_target);
+
+    // Visual bank (roll)
+    p.rotation.z = -planeBank;
   }
 
   void _snapCamera() {
     final p = plane;
     if (p == null) return;
 
-    final forward = _orbitTangentForward();
+    // Approx forward: towards target computed from next position
+    final fx = _target.x - p.position.x;
+    final fy = _target.y - p.position.y;
+    final fz = _target.z - p.position.z;
+    final fl = math.sqrt(fx * fx + fy * fy + fz * fz);
+    final fdx = fl < 1e-6 ? 0.0 : fx / fl;
+    final fdy = fl < 1e-6 ? 0.0 : fy / fl;
+    final fdz = fl < 1e-6 ? 1.0 : fz / fl;
 
     threeJs.camera.position.setValues(
-      p.position.x - forward.x * cameraDistance,
+      p.position.x - fdx * cameraDistance,
       p.position.y + cameraHeight,
-      p.position.z - forward.z * cameraDistance,
+      p.position.z - fdz * cameraDistance,
     );
 
     threeJs.camera.lookAt(
       three.Vector3(
-        p.position.x + forward.x * lookAhead,
-        p.position.y + math.tan(camPitch) * 30.0,
-        p.position.z + forward.z * lookAhead,
+        p.position.x + fdx * lookAhead,
+        p.position.y + fdy * lookAhead,
+        p.position.z + fdz * lookAhead,
       ),
     );
   }
 
   void _update(double dt) {
-    // Joystick -> x/y
     double x = 0.0;
     double y = 0.0;
     if (joystick != null && joystick!.isMoving) {
@@ -211,35 +219,48 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
       y = math.sin(a) * i;
     }
 
-    // X: turn/orbit speed (left/right)
-    orbitAngularSpeed = 0.35 + (x * 0.9);
-    orbitAngle += orbitAngularSpeed * dt;
+    // Speed along orbit (x)
+    orbitAngularSpeed = 0.8 + x * 1.6;
 
-    // Y: camera pitch only
-    camPitch = (camPitch + (-y) * 0.9 * dt).clamp(camPitchMin, camPitchMax);
-
-    // Plane position on orbit
-    _setPlaneOnOrbit();
-
-    final p = plane;
-    if (p != null) {
-      // Plane oriented along tangent
-      final forward = _orbitTangentForward();
-      final yaw = math.atan2(forward.x, forward.z);
-      p.rotation.y = yaw;
-
-      // bank for visuals
-      planeBank = (planeBank + (x * 1.2 - planeBank) * 0.08).clamp(-0.6, 0.6);
-      p.rotation.z = -planeBank;
-      p.rotation.x = 0;
+    // Optional: tilt orbit axis a bit (y) BUT keep ability to pass through poles:
+    // rotate axis around Z; small effect, safe.
+    if (y.abs() > 1e-4) {
+      final tilt = (-y) * 0.6 * dt;
+      _q.setFromAxisAngle(three.Vector3(0, 0, 1), tilt);
+      orbitAxis.applyQuaternion(_q);
+      orbitAxis.normalize();
     }
 
-    // Camera follow
-    if (p != null) {
-      final forward = _orbitTangentForward();
+    // Advance position vector around orbit axis. [web:67]
+    final dAng = orbitAngularSpeed * dt;
+    _q.setFromAxisAngle(orbitAxis, dAng);
+    posVec.applyQuaternion(_q);
 
-      final desiredX = p.position.x - forward.x * cameraDistance;
-      final desiredZ = p.position.z - forward.z * cameraDistance;
+    // Keep exact radius (manual multiplyScalar)
+    posVec.normalize();
+    final r = planetRadius + altitude;
+    posVec.x *= r;
+    posVec.y *= r;
+    posVec.z *= r;
+
+    // Bank visuals from x
+    planeBank = (planeBank + (x * 0.9 - planeBank) * 0.10).clamp(-0.7, 0.7);
+
+    _applyTransforms(dt);
+
+    // Camera follow (same motion-derived forward)
+    final p = plane;
+    if (p != null) {
+      final fx = _target.x - p.position.x;
+      final fy = _target.y - p.position.y;
+      final fz = _target.z - p.position.z;
+      final fl = math.sqrt(fx * fx + fy * fy + fz * fz);
+      final fdx = fl < 1e-6 ? 0.0 : fx / fl;
+      final fdy = fl < 1e-6 ? 0.0 : fy / fl;
+      final fdz = fl < 1e-6 ? 1.0 : fz / fl;
+
+      final desiredX = p.position.x - fdx * cameraDistance;
+      final desiredZ = p.position.z - fdz * cameraDistance;
       final desiredY = p.position.y + cameraHeight;
 
       threeJs.camera.position.x += (desiredX - threeJs.camera.position.x) * follow;
@@ -248,34 +269,22 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
 
       threeJs.camera.lookAt(
         three.Vector3(
-          p.position.x + forward.x * lookAhead,
-          p.position.y + math.tan(camPitch) * 30.0,
-          p.position.z + forward.z * lookAhead,
+          p.position.x + fdx * lookAhead,
+          p.position.y + fdy * lookAhead,
+          p.position.z + fdz * lookAhead,
         ),
       );
     }
 
-    // Earth spin (rotate the pivot, keeps center stable)
+    // Earth spin
     earthSpin += 0.15 * dt;
     earthPivot.rotation.y = earthSpin;
 
-    // Logs 1/sec
     _dbgAcc += dt;
     if (_dbgAcc >= 1.0) {
       _dbgAcc = 0.0;
-      final p = plane;
-      if (p != null) {
-        debugPrint(
-          'plane pos: x=${p.position.x.toStringAsFixed(1)} y=${p.position.y.toStringAsFixed(1)} z=${p.position.z.toStringAsFixed(1)} '
-              'orbitAngle=${orbitAngle.toStringAsFixed(2)} speed=${orbitAngularSpeed.toStringAsFixed(2)} camPitch=${camPitch.toStringAsFixed(2)}',
-        );
-      }
-      debugPrint(
-        'planetCenter: x=${planetCenter.x.toStringAsFixed(1)} y=${planetCenter.y.toStringAsFixed(1)} z=${planetCenter.z.toStringAsFixed(1)}',
-      );
-      debugPrint(
-        'camera pos: x=${threeJs.camera.position.x.toStringAsFixed(1)} y=${threeJs.camera.position.y.toStringAsFixed(1)} z=${threeJs.camera.position.z.toStringAsFixed(1)}',
-      );
+      final dist = math.sqrt(posVec.x * posVec.x + posVec.y * posVec.y + posVec.z * posVec.z);
+      debugPrint('dist=${dist.toStringAsFixed(1)} target=${(planetRadius + altitude).toStringAsFixed(1)} axis=(${orbitAxis.x.toStringAsFixed(2)},${orbitAxis.y.toStringAsFixed(2)},${orbitAxis.z.toStringAsFixed(2)})');
     }
   }
 }
