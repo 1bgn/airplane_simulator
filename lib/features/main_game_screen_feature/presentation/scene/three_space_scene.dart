@@ -13,32 +13,40 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
   late three.ThreeJS threeJs;
   three.Joystick? joystick;
 
-  three.Object3D? earthRoot; // earth.glb may contain multiple objects
+  // Earth: use a pivot so we can re-center the model without losing world position
+  final three.Object3D earthPivot = three.Object3D();
+  three.Object3D? earthRoot; // loaded glTF scene (multi-object)
+
   three.Object3D? plane;
 
   // Debug
   double _dbgAcc = 0.0;
 
-  // Flight
-  double yaw = 0.0;
-  double pitchVisual = 0.0;
+  // Planet center is the pivot's world position
+  final three.Vector3 planetCenter = three.Vector3(0, 0, 0);
 
-  // Tunables
-  final double speed = 25.0;      // units/sec
-  final double planeBaseY = 35.0; // constant altitude
-  final double yawSpeed = 1.6;    // rad/sec per joystick x
-  final double pitchSpeed = 1.0;  // rad/sec per joystick y
+  // Orbit parameters
+  final double orbitRadius = 380.0; // подгони под размер планеты
+  final double altitude = 120.0;    // фикс высота над центром (Y)
+  double orbitAngle = 0.0;
+  double orbitAngularSpeed = 0.35;
 
-  // Camera (chase)
-  final double cameraDistance = 220.0;
-  final double cameraHeight = 55.0;
-  final double lookAhead = 80.0;
-  final double follow = 0.10;
+  // Plane visuals
+  double planeBank = 0.0;
 
-  // Earth follows plane on X/Z, but stays low on Y
-  final double earthFixedY = -220.0;
-  final double earthAhead = 520.0; // always ahead of plane
-  final double earthScale = 80.0;
+  // Camera control (pitch only)
+  double camPitch = 0.25;
+  final double camPitchMin = -0.2;
+  final double camPitchMax = 0.9;
+
+  // Camera follow tuning
+  final double cameraDistance = 240.0;
+  final double cameraHeight = 60.0;
+  final double follow = 0.12;
+  final double lookAhead = 60.0;
+
+  // Earth spin
+  double earthSpin = 0.0;
 
   @override
   void initState() {
@@ -56,20 +64,7 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     joystick?.dispose();
     super.dispose();
   }
-  void _normalizeObjectToSize(three.Object3D obj, double targetSize) {
-    // Box3.setFromObject traverses children and computes overall bounds. [web:160]
-    final box = three.BoundingBox().setFromObject(obj);
-    final size = three.Vector3(0, 0, 0);
-    box.getSize(size);
 
-    final maxDim = math.max(size.x, math.max(size.y, size.z));
-    if (maxDim <= 0) return;
-
-    final s = targetSize / maxDim;
-    obj.scale.x *= s;
-    obj.scale.y *= s;
-    obj.scale.z *= s;
-  }
   @override
   Widget build(BuildContext context) => threeJs.build();
 
@@ -83,71 +78,66 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     )
         : null;
 
-    // Camera
     threeJs.camera = three.PerspectiveCamera(
       60,
       threeJs.width / threeJs.height,
       0.1,
-      5000,
+      8000,
     );
 
-    // Scene
     threeJs.scene = three.Scene();
     threeJs.scene.background = three.Color.fromHex32(0x000010);
 
-    // Lights
     threeJs.scene.add(three.AmbientLight(0xffffff, 0.75));
     final sun = three.DirectionalLight(0xffffff, 1.1);
     sun.position.setValues(50, 80, 30);
     threeJs.scene.add(sun);
 
-    // Loader
-    final loader = three.GLTFLoader(flipY: true).setPath('assets/3d_models/'); // [web:145]
+    // Put planet pivot at world origin (the orbit center)
+    earthPivot.position.setValues(planetCenter.x, planetCenter.y, planetCenter.z);
+    threeJs.scene.add(earthPivot);
 
-    // Earth
+    final loader = three.GLTFLoader(flipY: true).setPath('assets/3d_models/');
+
+    // ---- Earth ----
     final earthGLB = await loader.fromAsset('earth.glb');
     if (earthGLB == null) {
-      debugPrint('earth.glb not loaded (check pubspec.yaml assets)');
+      debugPrint('earth.glb not loaded');
       return;
     }
+
     earthRoot = earthGLB.scene;
-    earthRoot!.scale.setValues(earthScale, earthScale, earthScale);
 
-    // Helps with multi-object scenes that may get culled due to odd bounds. [web:160]
-    earthRoot!.traverse((obj) {
-      obj.frustumCulled = false;
-    });
-    _normalizeObjectToSize(earthRoot!, 400);
-    threeJs.scene.add(earthRoot!);
+    // Disable culling for all children (robustness for multi-object scenes). [web:160]
+    earthRoot!.traverse((o) => o.frustumCulled = false);
 
-    // Plane
+    // Compute geo center and re-center INSIDE the pivot. [web:160]
+    final center = three.Vector3(0, 0, 0);
+    final bbox = three.BoundingBox().setFromObject(earthRoot!);
+    bbox.getCenter(center);
+
+    // Important: re-center by shifting the loaded root inside pivot,
+    // NOT by setting earthRoot.position afterwards.
+    earthRoot!.position.setValues(-center.x, -center.y, -center.z);
+
+    // Attach to pivot
+    earthPivot.add(earthRoot!);
+
+    // ---- Plane ----
     final planeGLB = await loader.fromAsset('airplane.glb');
     if (planeGLB == null) {
-      debugPrint('airplane.glb not loaded (check pubspec.yaml assets)');
+      debugPrint('airplane.glb not loaded');
       return;
     }
     plane = planeGLB.scene;
-    plane!.position.setValues(0, planeBaseY, 0);
     plane!.scale.setValues(1, 1, 1);
     threeJs.scene.add(plane!);
 
-    // Initial placements so Earth is visible immediately
-    earthRoot!.position.setValues(
-      plane!.position.x,
-      earthFixedY,
-      plane!.position.z + earthAhead,
-    );
+    // Start
+    _setPlaneOnOrbit();
+    _snapCamera();
 
-    // Initial camera behind plane (plane forward is +Z)
-    final forward0 = three.Vector3(0, 0, 1);
-    threeJs.camera.position.setValues(
-      plane!.position.x - forward0.x * cameraDistance,
-      plane!.position.y + cameraHeight,
-      plane!.position.z - forward0.z * cameraDistance,
-    );
-    threeJs.camera.lookAt(plane!.position);
-
-    // Joystick overlay like example
+    // Joystick overlay
     threeJs.renderer?.autoClear = false;
     if (joystick != null) {
       threeJs.postProcessor = ([double? dt]) {
@@ -159,18 +149,59 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
       };
     }
 
-    // Animation loop
     threeJs.addAnimationEvent((dt) {
       joystick?.update();
       _update(dt);
     });
   }
 
-  void _update(double dt) {
+  void _setPlaneOnOrbit() {
     final p = plane;
     if (p == null) return;
 
-    // Joystick polar -> x/y
+    final x = planetCenter.x + math.cos(orbitAngle) * orbitRadius;
+    final z = planetCenter.z + math.sin(orbitAngle) * orbitRadius;
+    final y = planetCenter.y + altitude;
+
+    p.position.setValues(x, y, z);
+  }
+
+  three.Vector3 _orbitTangentForward() {
+    final tx = -math.sin(orbitAngle);
+    final tz = math.cos(orbitAngle);
+    final v = three.Vector3(tx, 0, tz);
+
+    final len = math.sqrt(v.x * v.x + v.z * v.z);
+    if (len > 1e-6) {
+      v.x /= len;
+      v.z /= len;
+    }
+    return v;
+  }
+
+  void _snapCamera() {
+    final p = plane;
+    if (p == null) return;
+
+    final forward = _orbitTangentForward();
+
+    threeJs.camera.position.setValues(
+      p.position.x - forward.x * cameraDistance,
+      p.position.y + cameraHeight,
+      p.position.z - forward.z * cameraDistance,
+    );
+
+    threeJs.camera.lookAt(
+      three.Vector3(
+        p.position.x + forward.x * lookAhead,
+        p.position.y + math.tan(camPitch) * 30.0,
+        p.position.z + forward.z * lookAhead,
+      ),
+    );
+  }
+
+  void _update(double dt) {
+    // Joystick -> x/y
     double x = 0.0;
     double y = 0.0;
     if (joystick != null && joystick!.isMoving) {
@@ -180,74 +211,70 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
       y = math.sin(a) * i;
     }
 
-    // Update yaw + visual pitch (no altitude change)
-    yaw += x * yawSpeed * dt;
-    pitchVisual = (pitchVisual + (-y) * pitchSpeed * dt).clamp(-0.6, 0.6);
+    // X: turn/orbit speed (left/right)
+    orbitAngularSpeed = 0.35 + (x * 0.9);
+    orbitAngle += orbitAngularSpeed * dt;
 
-    p.rotation.y = yaw;
-    p.rotation.x = pitchVisual;
-    p.rotation.z = 0;
+    // Y: camera pitch only
+    camPitch = (camPitch + (-y) * 0.9 * dt).clamp(camPitchMin, camPitchMax);
 
-    // Forward direction on X/Z plane only
-    final forward = three.Vector3(0, 0, 1);
-    forward.applyEuler(three.Euler(0, yaw, 0));
+    // Plane position on orbit
+    _setPlaneOnOrbit();
 
-    // Move plane forward + keep constant altitude
-    p.position.x += forward.x * speed * dt;
-    p.position.z += forward.z * speed * dt;
-    p.position.y = planeBaseY;
+    final p = plane;
+    if (p != null) {
+      // Plane oriented along tangent
+      final forward = _orbitTangentForward();
+      final yaw = math.atan2(forward.x, forward.z);
+      p.rotation.y = yaw;
 
-    // Earth follows plane on X/Z (fixed Y), stays ahead so it’s in view
-    final e = earthRoot;
-    if (e != null) {
-      e.position.x = p.position.x;
-      e.position.y = earthFixedY;
-      e.position.z = p.position.z + earthAhead;
-      e.rotation.y += 0.05 * dt;
+      // bank for visuals
+      planeBank = (planeBank + (x * 1.2 - planeBank) * 0.08).clamp(-0.6, 0.6);
+      p.rotation.z = -planeBank;
+      p.rotation.x = 0;
     }
 
-    // Camera behind plane
-    final desiredX = p.position.x - forward.x * cameraDistance;
-    final desiredY = p.position.y + cameraHeight;
-    final desiredZ = p.position.z - forward.z * cameraDistance;
+    // Camera follow
+    if (p != null) {
+      final forward = _orbitTangentForward();
 
-    threeJs.camera.position.x += (desiredX - threeJs.camera.position.x) * follow;
-    threeJs.camera.position.y += (desiredY - threeJs.camera.position.y) * follow;
-    threeJs.camera.position.z += (desiredZ - threeJs.camera.position.z) * follow;
+      final desiredX = p.position.x - forward.x * cameraDistance;
+      final desiredZ = p.position.z - forward.z * cameraDistance;
+      final desiredY = p.position.y + cameraHeight;
 
-    // Look ahead (so Earth ahead is also likely visible)
-    threeJs.camera.lookAt(
-      three.Vector3(
-        p.position.x + forward.x * lookAhead,
-        p.position.y,
-        p.position.z + forward.z * lookAhead,
-      ),
-    );
+      threeJs.camera.position.x += (desiredX - threeJs.camera.position.x) * follow;
+      threeJs.camera.position.y += (desiredY - threeJs.camera.position.y) * follow;
+      threeJs.camera.position.z += (desiredZ - threeJs.camera.position.z) * follow;
 
-    // Debug logs 1/sec
+      threeJs.camera.lookAt(
+        three.Vector3(
+          p.position.x + forward.x * lookAhead,
+          p.position.y + math.tan(camPitch) * 30.0,
+          p.position.z + forward.z * lookAhead,
+        ),
+      );
+    }
+
+    // Earth spin (rotate the pivot, keeps center stable)
+    earthSpin += 0.15 * dt;
+    earthPivot.rotation.y = earthSpin;
+
+    // Logs 1/sec
     _dbgAcc += dt;
     if (_dbgAcc >= 1.0) {
       _dbgAcc = 0.0;
-
-      debugPrint(
-        'plane pos: x=${p.position.x.toStringAsFixed(1)} '
-            'y=${p.position.y.toStringAsFixed(1)} '
-            'z=${p.position.z.toStringAsFixed(1)}',
-      );
-
-      final er = earthRoot;
-      if (er != null) {
+      final p = plane;
+      if (p != null) {
         debugPrint(
-          'earth pos: x=${er.position.x.toStringAsFixed(1)} '
-              'y=${er.position.y.toStringAsFixed(1)} '
-              'z=${er.position.z.toStringAsFixed(1)}',
+          'plane pos: x=${p.position.x.toStringAsFixed(1)} y=${p.position.y.toStringAsFixed(1)} z=${p.position.z.toStringAsFixed(1)} '
+              'orbitAngle=${orbitAngle.toStringAsFixed(2)} speed=${orbitAngularSpeed.toStringAsFixed(2)} camPitch=${camPitch.toStringAsFixed(2)}',
         );
       }
-
       debugPrint(
-        'camera pos: x=${threeJs.camera.position.x.toStringAsFixed(1)} '
-            'y=${threeJs.camera.position.y.toStringAsFixed(1)} '
-            'z=${threeJs.camera.position.z.toStringAsFixed(1)}',
+        'planetCenter: x=${planetCenter.x.toStringAsFixed(1)} y=${planetCenter.y.toStringAsFixed(1)} z=${planetCenter.z.toStringAsFixed(1)}',
+      );
+      debugPrint(
+        'camera pos: x=${threeJs.camera.position.x.toStringAsFixed(1)} y=${threeJs.camera.position.y.toStringAsFixed(1)} z=${threeJs.camera.position.z.toStringAsFixed(1)}',
       );
     }
   }
