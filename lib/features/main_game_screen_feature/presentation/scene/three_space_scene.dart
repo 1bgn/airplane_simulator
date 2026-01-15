@@ -1,6 +1,9 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+
 import 'package:three_js/three_js.dart' as three;
+import 'package:three_js_controls/three_js_controls.dart';
+
 class ThreeSpaceScene extends StatefulWidget {
   const ThreeSpaceScene({super.key});
 
@@ -10,54 +13,31 @@ class ThreeSpaceScene extends StatefulWidget {
 
 class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
   late three.ThreeJS threeJs;
-  three.Joystick? joystick;
-  final three.Vector3 _fwd = three.Vector3(0, 0, 1);
-  final three.Vector3 _right = three.Vector3(1, 0, 0);
-  final three.Vector3 _camPos = three.Vector3(0, 0, 0);
-  final three.Object3D earthPivot = three.Object3D();
-  three.Object3D? earthRoot;
-  three.Object3D? plane;
+  OrbitControls? controls;
 
-  double _dbgAcc = 0.0;
+  three.Object3D? airplane;
+  three.Mesh? terrain;
 
-  final three.Vector3 planetCenter = three.Vector3(0, 0, 0);
+  // Terrain params
+  final double terrainW = 2000.0;
+  final double terrainH = 2000.0;
+  final int terrainSegW = 240;
+  final int terrainSegH = 240;
 
-  final double planetRadius = 380.0;
-  final double altitude = 120.0;
+  // Flight (straight line)
+  double planeX = 0.0;
+  double planeZ = -800.0;
+  final double planeSpeed = 120.0; // world units per second
 
-  // Great-circle orbit axis (normal of orbit plane). X => проход через полюса.
-  final three.Vector3 orbitAxis = three.Vector3(1, 0, 0);
+  // IMPORTANT: fixed flight altitude (no "bobbing")
+  final double flightY = 60.0;
 
-  // Vector from center to plane
-  final three.Vector3 posVec = three.Vector3(0, 1, 0);
+  // Camera: strictly behind
+  final double followBack = 110.0;
+  final double followUp = 35.0;
 
-  double orbitAngularSpeed = 0.25;
-
-  // Plane visuals
-  double planeBank = 0.0;
-
-  // Camera (fixed relative to plane, horizon fixed to world)
-  final double cameraDistance = 240.0;
-  final double cameraHeight = 60.0;
-  final double lookAhead = 80.0;
-
-  // Camera pitch
-  double camPitch = 0.0;
-  final double camPitchMin = -0.35;
-  final double camPitchMax = 0.35;
-  final double camPitchSpeed = 0.9;
-
-  // Earth spin
-  double earthSpin = 0.0;
-
-  // Temps
-  final three.Quaternion _q = three.Quaternion();
-  final three.Vector3 _upPlane = three.Vector3(0, 1, 0);
-  final three.Vector3 _posNext = three.Vector3(0, 0, 0);
-  final three.Vector3 _targetPlane = three.Vector3(0, 0, 0);
-
-  // Reused vectors (no allocations each frame)
-  final three.Vector3 _lookAtCam = three.Vector3(0, 0, 0);
+  // temps
+  final three.Vector3 _tmpLookAt = three.Vector3(0, 0, 0);
 
   @override
   void initState() {
@@ -70,241 +50,128 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
 
   @override
   void dispose() {
+    controls?.dispose();
     threeJs.dispose();
     three.loading.clear();
-    joystick?.dispose();
     super.dispose();
   }
 
   @override
-  Widget build(BuildContext context) => threeJs.build();
+  Widget build(BuildContext context) => Scaffold(body: threeJs.build());
+
+  // One function for both mesh generation and any sampling if needed later
+  double terrainHeight(double x, double z) {
+    final h1 = 18.0 * math.sin(x * 0.010) * math.cos(z * 0.010);
+    final h2 = 8.0 * math.sin(x * 0.035 + 1.7) * math.cos(z * 0.030 - 0.6);
+    return h1 + h2;
+  }
+
+  three.Mesh buildTerrain() {
+    final geo = three.PlaneGeometry(terrainW, terrainH, terrainSegW, terrainSegH);
+    geo.rotateX(-math.pi / 2);
+
+    // NOTE: three_js uses Attribute.position (not 'position')
+    final pos =
+    geo.getAttribute(three.Attribute.position) as three.BufferAttribute;
+
+    for (int i = 0; i < pos.count; i++) {
+      final x = (pos.getX(i) ?? 0).toDouble();
+      final z = (pos.getZ(i) ?? 0).toDouble();
+      pos.setY(i, terrainHeight(x, z));
+    }
+
+    pos.needsUpdate = true;
+    geo.computeVertexNormals();
+
+    final mat = three.MeshStandardMaterial.fromMap({
+      'color': 0x556644,
+      'roughness': 1.0,
+      'metalness': 0.0,
+    });
+
+    final mesh = three.Mesh(geo, mat);
+    mesh.receiveShadow = true;
+    return mesh;
+  }
 
   Future<void> setup() async {
-    joystick = threeJs.width < 850
-        ? three.Joystick(
-      size: 150,
-      margin: const EdgeInsets.only(left: 35, bottom: 35),
-      screenSize: Size(threeJs.width, threeJs.height),
-      listenableKey: threeJs.globalKey,
-    )
-        : null;
-
+    // Camera
     threeJs.camera = three.PerspectiveCamera(
       60,
       threeJs.width / threeJs.height,
       0.1,
       8000,
     );
-
-    // Fixed horizon for camera lookAt. [web:19]
+    threeJs.camera.position.setValues(0, flightY + followUp, planeZ - followBack);
     threeJs.camera.up.setValues(0, 1, 0);
 
+    // Scene
     threeJs.scene = three.Scene();
-    threeJs.scene.background = three.Color.fromHex32(0x000010);
+    threeJs.scene.background = three.Color.fromHex32(0x87B6FF);
 
-    threeJs.scene.add(three.AmbientLight(0xffffff, 0.75));
-    final sun = three.DirectionalLight(0xffffff, 1.1);
-    sun.position.setValues(50, 80, 30);
+    // Controls: locked (camera is fully driven by code)
+    controls = OrbitControls(threeJs.camera, threeJs.globalKey)
+      ..enableDamping = false
+      ..enableRotate = false
+      ..enablePan = false
+      ..enableZoom = false;
+
+    // Light
+    threeJs.scene.add(three.AmbientLight(0xffffff, 0.55));
+    final sun = three.DirectionalLight(0xffffff, 1.2);
+    sun.position.setValues(300, 600, 200);
     threeJs.scene.add(sun);
 
-    earthPivot.position.setValues(planetCenter.x, planetCenter.y, planetCenter.z);
-    threeJs.scene.add(earthPivot);
+    // Terrain
+    terrain = buildTerrain();
+    threeJs.scene.add(terrain!);
 
+    // Airplane
     final loader = three.GLTFLoader(flipY: true).setPath('assets/3d_models/');
+    final airplaneGltf = await loader.fromAsset('airplane.glb');
+    airplane = airplaneGltf?.scene;
 
-    final earthGLB = await loader.fromAsset('earth.glb');
-    if (earthGLB == null) return;
-    earthRoot = earthGLB.scene;
-    earthRoot!.traverse((o) => o.frustumCulled = false);
+    if (airplane != null) {
+      airplane!.scale.setValues(0.35, 0.35, 0.35);
+      threeJs.scene.add(airplane!);
 
-    final center = three.Vector3(0, 0, 0);
-    final bbox = three.BoundingBox().setFromObject(earthRoot!);
-    bbox.getCenter(center);
-    earthRoot!.position.setValues(-center.x, -center.y, -center.z);
-    earthPivot.add(earthRoot!);
-
-    final planeGLB = await loader.fromAsset('airplane.glb');
-    if (planeGLB == null) return;
-    plane = planeGLB.scene;
-
-    plane!.scale.setValues(1, 1, 1);
-    threeJs.scene.add(plane!);
-
-    // init radius
-    posVec.normalize();
-    final r = planetRadius + altitude;
-    posVec.x *= r;
-    posVec.y *= r;
-    posVec.z *= r;
-
-    // initial transforms and camera
-    _applyPlaneTransform(1 / 60.0);
-    _updateCameraFixed();
-
-    threeJs.renderer?.autoClear = false;
-    if (joystick != null) {
-      threeJs.postProcessor = ([double? dt]) {
-        threeJs.renderer!.setViewport(0, 0, threeJs.width, threeJs.height);
-        threeJs.renderer!.clear();
-        threeJs.renderer!.render(threeJs.scene, threeJs.camera);
-        threeJs.renderer!.clearDepth();
-        threeJs.renderer!.render(joystick!.scene, joystick!.camera);
-      };
+      airplane!.position.setValues(planeX, flightY, planeZ);
+      airplane!.lookAt(three.Vector3(planeX, flightY, planeZ + 10.0));
     }
 
+    // Animation
     threeJs.addAnimationEvent((dt) {
-      joystick?.update();
-      _update(dt);
+      if (airplane == null) return;
+
+      // Move straight along +Z
+      planeZ += planeSpeed * dt;
+
+      // Simple wrap (keeps you inside the same terrain tile)
+      if (planeZ > terrainH * 0.5) {
+        planeZ = -terrainH * 0.5;
+      }
+
+      // Fixed height: NO terrain sampling here
+      airplane!.position.setValues(planeX, flightY, planeZ);
+
+      // Fixed forward orientation (+Z): NO pitch/roll from terrain
+      _tmpLookAt.setValues(planeX, flightY, planeZ + 15.0);
+      airplane!.lookAt(_tmpLookAt);
+
+      // Camera strictly behind (no smoothing)
+      threeJs.camera.position.setValues(
+        airplane!.position.x,
+        airplane!.position.y + followUp,
+        airplane!.position.z - followBack,
+      );
+
+      // Look at airplane via OrbitControls target
+      controls!.target.setValues(
+        airplane!.position.x,
+        airplane!.position.y,
+        airplane!.position.z,
+      );
+      controls!.update();
     });
-  }
-
-  void _applyPlaneTransform(double dt) {
-    final p = plane;
-    if (p == null) return;
-
-    // Position
-    p.position.setValues(
-      planetCenter.x + posVec.x,
-      planetCenter.y + posVec.y,
-      planetCenter.z + posVec.z,
-    );
-
-    // Plane up = radial
-    _upPlane.setValues(posVec.x, posVec.y, posVec.z);
-    _upPlane.normalize();
-
-    // Target = next position (direction of motion) for stable heading at poles. [web:44]
-    _posNext.setValues(posVec.x, posVec.y, posVec.z);
-    final dAngNext = orbitAngularSpeed * (dt > 0 ? dt : 1 / 60.0);
-    _q.setFromAxisAngle(orbitAxis, dAngNext);
-    _posNext.applyQuaternion(_q);
-
-    _targetPlane.setValues(
-      planetCenter.x + _posNext.x,
-      planetCenter.y + _posNext.y,
-      planetCenter.z + _posNext.z,
-    );
-
-    p.up.setValues(_upPlane.x, _upPlane.y, _upPlane.z);
-    p.lookAt(_targetPlane);
-
-    // bank
-    p.rotation.z = -planeBank;
-  }
-
-
-  void _addScaled(three.Vector3 out, three.Vector3 v, double s) {
-    out.x += v.x * s;
-    out.y += v.y * s;
-    out.z += v.z * s;
-  }
-
-  void _crossInto(three.Vector3 out, three.Vector3 a, three.Vector3 b) {
-    final ax = a.x, ay = a.y, az = a.z;
-    final bx = b.x, by = b.y, bz = b.z;
-    out.x = ay * bz - az * by;
-    out.y = az * bx - ax * bz;
-    out.z = ax * by - ay * bx;
-  }
-  void _updateCameraFixed() {
-    final p = plane;
-    if (p == null) return;
-
-    // 1) up = радиальный "вверх" от центра планеты
-    _upPlane.setValues(posVec.x, posVec.y, posVec.z);
-    _upPlane.normalize();
-
-    // 2) forward = касательная (направление движения)
-    _fwd.setValues(
-      _targetPlane.x - p.position.x,
-      _targetPlane.y - p.position.y,
-      _targetPlane.z - p.position.z,
-    );
-    _fwd.normalize();
-
-    // 3) right = forward x up
-    _crossInto(_right, _fwd, _upPlane);
-    final rl = math.sqrt(_right.x * _right.x + _right.y * _right.y + _right.z * _right.z);
-    if (rl < 1e-6) {
-      // редкий вырожденный случай: если вдруг forward || up, просто не обновляем камеру
-      return;
-    }
-    _right.x /= rl; _right.y /= rl; _right.z /= rl;
-
-    // 4) re-orthogonalize forward = up x right
-    _crossInto(_fwd, _upPlane, _right);
-    _fwd.normalize();
-
-    // 5) camera position: позади и выше в базисе (forward/up), а не по world Y
-    _camPos.setValues(p.position.x, p.position.y, p.position.z);
-    _addScaled(_camPos, _fwd, -cameraDistance);
-    _addScaled(_camPos, _upPlane, cameraHeight);
-
-    threeJs.camera.position.setValues(_camPos.x, _camPos.y, _camPos.z);
-
-    // 6) lookAt: вперёд + небольшой pitch по локальному up
-    final pitchUp = math.tan(camPitch) * 50.0;
-
-    _lookAtCam.setValues(p.position.x, p.position.y, p.position.z);
-    _addScaled(_lookAtCam, _fwd, lookAhead);
-    _addScaled(_lookAtCam, _upPlane, pitchUp);
-
-    // Вариант A: “горизонт фиксирован в мире”
-    threeJs.camera.up.setValues(0, 1, 0);
-
-    // Вариант B: “горизонт по планете” (обычно выглядит естественнее на сфере)
-    // threeJs.camera.up.setValues(_upPlane.x, _upPlane.y, _upPlane.z);
-
-    threeJs.camera.lookAt(_lookAtCam); // up влияет на roll при lookAt [web:11]
-  }
-
-
-
-  void _update(double dt) {
-    dt = dt.clamp(1.0 / 120.0, 1.0 / 30.0);
-
-    double x = 0.0;
-    double y = 0.0;
-    if (joystick != null && joystick!.isMoving) {
-      final a = joystick!.radians;
-      final i = joystick!.intensity.clamp(0.0, 1.0);
-      x = math.cos(a) * i;
-      y = math.sin(a) * i;
-    }
-
-    // Orbit speed
-    orbitAngularSpeed = 0.25 + x * 1.2;
-
-    // Camera pitch
-    camPitch = (camPitch + (-y) * camPitchSpeed * dt).clamp(camPitchMin, camPitchMax);
-
-    // Move along orbit axis-angle. [web:67]
-    final dAng = orbitAngularSpeed * dt;
-    _q.setFromAxisAngle(orbitAxis, dAng);
-    posVec.applyQuaternion(_q);
-
-    // keep constant radius
-    posVec.normalize();
-    final r = planetRadius + altitude;
-    posVec.x *= r;
-    posVec.y *= r;
-    posVec.z *= r;
-
-    // plane bank
-    planeBank = (planeBank + (x * 0.9 - planeBank) * 0.10).clamp(-0.7, 0.7);
-
-    _applyPlaneTransform(dt);
-    _updateCameraFixed();
-
-    // Earth spin
-    earthSpin += 0.15 * dt;
-    earthPivot.rotation.y = earthSpin;
-
-    _dbgAcc += dt;
-    if (_dbgAcc >= 1.0) {
-      _dbgAcc = 0.0;
-      final dist = math.sqrt(posVec.x * posVec.x + posVec.y * posVec.y + posVec.z * posVec.z);
-      debugPrint('dist=${dist.toStringAsFixed(1)} target=${(planetRadius + altitude).toStringAsFixed(1)} camPitch=${camPitch.toStringAsFixed(2)}');
-    }
   }
 }
