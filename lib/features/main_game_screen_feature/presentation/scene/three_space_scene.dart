@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 
 import 'package:flutter_joystick/flutter_joystick.dart';
 import 'package:three_js/three_js.dart' as three;
-import 'package:three_js_controls/three_js_controls.dart' hide Joystick;
 
 class ThreeSpaceScene extends StatefulWidget {
   const ThreeSpaceScene({super.key});
@@ -14,11 +13,10 @@ class ThreeSpaceScene extends StatefulWidget {
 
 class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
   late three.ThreeJS threeJs;
-  OrbitControls? controls;
 
   three.Mesh? terrain;
 
-  // New: container + model (to separate yaw vs roll)
+  // Airplane: rig + model (rig handles yaw, model handles roll)
   three.Object3D? airplaneRig;
   three.Object3D? airplaneModel;
 
@@ -28,14 +26,11 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
   final int terrainSegW = 240;
   final int terrainSegH = 240;
 
-  // Flight
+  // Flight state
   double planeX = 0.0;
   double planeZ = -800.0;
+  final double flightY = 60.0; // fixed altitude
 
-  // Fixed altitude (no bobbing)
-  final double flightY = 60.0;
-
-  // Speed
   final double planeSpeed = 120.0;
 
   // Heading (yaw) radians, 0 => +Z
@@ -43,22 +38,31 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
 
   // Joystick input (-1..1)
   double _yawInput = 0.0;
+  final double yawRate = 1.4; // rad/s at full deflection
 
-  // Turn rate (rad/s at full deflection)
-  final double yawRate = 1.4;
-// Camera: strictly behind current forward vector
-
-
-// NEW: side offset (positive => left)
-  final double followLeft = 28.0;
-  // Bank (roll) animation
-  final double maxBankDeg = 18.0;     // max tilt
-  final double bankSmooth = 0.12;     // 0..1 per frame-like smoothing
-  double _bank = 0.0;                // current bank angle (rad)
-
-  // Camera: strictly behind current forward vector
+  // Camera follow
   final double followBack = 110.0;
   final double followUp = 35.0;
+  final double followLeft = 28.0;
+
+  // Bank animation
+  final double maxBankDeg = 18.0;
+  final double bankSmooth = 0.12;
+  double _bank = 0.0;
+
+  // Collectibles (balls)
+  int score = 0;
+  three.Object3D? ballTemplate;
+  final List<three.Object3D> balls = [];
+  final int ballCount = 50;
+
+  // Hover = доп.зазор над поверхностью, а не "высота центра"
+  final double ballHover = 6.0;
+  double _ballRadius = 0.0; // вычисляем из модели
+  final double _groundEps = 0.5;
+
+  final double pickupRadius = 28.0; // collision distance threshold
+  final _rng = math.Random();
 
   // temps
   final three.Vector3 _tmpForward = three.Vector3(0, 0, 1);
@@ -75,7 +79,6 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
 
   @override
   void dispose() {
-    controls?.dispose();
     threeJs.dispose();
     three.loading.clear();
     super.dispose();
@@ -87,6 +90,18 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
       body: Stack(
         children: [
           threeJs.build(),
+          Positioned(
+            left: 20,
+            top: 40,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              color: Colors.black54,
+              child: Text(
+                'Score: $score',
+                style: const TextStyle(color: Colors.white, fontSize: 18),
+              ),
+            ),
+          ),
           Positioned(
             left: 20,
             bottom: 20,
@@ -127,24 +142,23 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
 
     pos.needsUpdate = true;
     geo.computeVertexNormals();
-
     geo.computeBoundingBox();
-    geo.computeBoundingSphere(); // [web:131]
+    geo.computeBoundingSphere();
 
     final mat = three.MeshStandardMaterial.fromMap({
       'color': 0x2ECC71,
       'roughness': 1.0,
       'metalness': 0.0,
+      'side': three.DoubleSide,
     });
 
     final mesh = three.Mesh(geo, mat);
 
-    // Если всё равно будет пропадать — просто отключи frustum culling для террейна
-    mesh.frustumCulled = false; // [web:124]
+    // If terrain disappears sometimes, disable frustum culling
+    mesh.frustumCulled = false;
 
     return mesh;
   }
-
 
   double _wrap(double v, double min, double max) {
     final range = max - min;
@@ -154,7 +168,112 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     return v;
   }
 
+  final double targetBallRadius = 10.0;
+
+  double _computeRadiusWorld(three.Object3D obj) {
+    obj.updateMatrixWorld(true);
+
+    final bb = three.BoundingBox().setFromObject(obj, true);
+    final bs = three.BoundingSphere();
+    bb.getBoundingSphere(bs);
+    return bs.radius;
+  }
+
   double _lerp(double a, double b, double t) => a + (b - a) * t;
+  double _rand(double a, double b) => a + (b - a) * _rng.nextDouble();
+
+  double _dist3(double ax, double ay, double az, double bx, double by, double bz) {
+    final dx = ax - bx;
+    final dy = ay - by;
+    final dz = az - bz;
+    return math.sqrt(dx * dx + dy * dy + dz * dz);
+  }
+
+  /// Равномерная раскладка по террейну:
+  /// - делим тайл на grid-ячейки
+  /// - в каждой ячейке берём случайную точку (jitter)
+  /// - ставим шар на высоту террейна + radius + hover
+  void _scatterBallsUniformOnTerrain() {
+    if (balls.isEmpty) return;
+
+    final cols = math.sqrt(ballCount).ceil();
+    final rows = (ballCount / cols).ceil();
+
+    final cellW = terrainW / cols;
+    final cellH = terrainH / rows;
+
+    int i = 0;
+    for (int r = 0; r < rows && i < balls.length; r++) {
+      for (int c = 0; c < cols && i < balls.length; c++) {
+        final xCenter = -terrainW * 0.5 + (c + 0.5) * cellW;
+        final zCenter = -terrainH * 0.5 + (r + 0.5) * cellH;
+
+        // пробуем несколько раз найти XZ в этой ячейке, где шар не пересечёт террейн
+        double x = xCenter;
+        double z = zCenter;
+
+        const triesPerCell = 12;
+        bool ok = false;
+
+        for (int t = 0; t < triesPerCell; t++) {
+          final rx = xCenter + _rand(-0.45 * cellW, 0.45 * cellW);
+          final rz = zCenter + _rand(-0.45 * cellH, 0.45 * cellH);
+          if (_ballXZIsAboveGround(rx, rz)) {
+            x = rx;
+            z = rz;
+            ok = true;
+            break;
+          }
+        }
+
+        // если в этой ячейке террейн слишком высокий — оставим точку (можно и пропускать/переносить)
+        if (!ok) {
+          x = xCenter;
+          z = zCenter;
+        }
+
+        // ВАЖНО: Y совпадает с самолётом
+        final y = flightY;
+        balls[i].position.setValues(x, y, z);
+        i++;
+      }
+    }
+  }
+
+  bool _ballXZIsAboveGround(double x, double z) {
+    // хотим, чтобы низ шара был выше поверхности (или хотя бы не ниже)
+    final groundY = terrainHeight(x, z);
+    final minCenterY = groundY + _ballRadius + ballHover + _groundEps;
+    return flightY >= minCenterY;
+  }
+
+  /// Респавн равномерно по всему тайлу (а не "впереди самолёта"),
+  /// плюс пытаемся не спавнить слишком близко к самолёту.
+  void _respawnBall(three.Object3D b) {
+    const minFromPlane = 120.0;
+    const tries = 80;
+
+    double x = 0.0;
+    double z = 0.0;
+
+    for (int t = 0; t < tries; t++) {
+      final rx = _rand(-terrainW * 0.5, terrainW * 0.5);
+      final rz = _rand(-terrainH * 0.5, terrainH * 0.5);
+
+      if (!_ballXZIsAboveGround(rx, rz)) continue;
+
+      final d = _dist3(rx, flightY, rz, planeX, flightY, planeZ);
+      if (d < minFromPlane) continue;
+
+      x = rx;
+      z = rz;
+      break;
+    }
+
+    // ВАЖНО: Y совпадает с самолётом
+    b.position.setValues(x, flightY, z);
+  }
+
 
   Future<void> setup() async {
     // Camera
@@ -170,14 +289,6 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     threeJs.scene = three.Scene();
     threeJs.scene.background = three.Color.fromHex32(0x4A90E2);
 
-
-    // Controls: locked (camera fully driven by code)
-    controls = OrbitControls(threeJs.camera, threeJs.globalKey)
-      ..enableDamping = false
-      ..enableRotate = false
-      ..enablePan = false
-      ..enableZoom = false;
-
     // Light
     threeJs.scene.add(three.AmbientLight(0xffffff, 0.55));
     final sun = three.DirectionalLight(0xffffff, 1.2);
@@ -188,7 +299,7 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     terrain = buildTerrain();
     threeJs.scene.add(terrain!);
 
-    // Airplane: rig + model
+    // Airplane
     airplaneRig = three.Object3D();
     threeJs.scene.add(airplaneRig!);
 
@@ -198,41 +309,72 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
 
     if (airplaneModel != null) {
       airplaneModel!.scale.setValues(0.35, 0.35, 0.35);
-
-      // IMPORTANT: model is child, so we can roll it without breaking yaw from rig
       airplaneRig!.add(airplaneModel!);
 
       airplaneRig!.position.setValues(planeX, flightY, planeZ);
 
-      // initial yaw via lookAt (rig only) [web:16]
       _tmpLookAt.setValues(planeX, flightY, planeZ + 10.0);
       airplaneRig!.lookAt(_tmpLookAt);
+    }
+
+    // Balls: load once, clone many
+    final ballLoader = three.GLTFLoader(flipY: true).setPath('assets/3d_models/');
+    final ballGltf = await ballLoader.fromAsset('pokeball.glb');
+    ballTemplate = ballGltf?.scene;
+
+    if (ballTemplate != null) {
+      // 1) Сброс scale, чтобы измерить "нативный" радиус
+      ballTemplate!.scale.setValues(1.0, 1.0, 1.0);
+
+      // 2) Измеряем текущий радиус
+      var r0 = _computeRadiusWorld(ballTemplate!);
+      if (!r0.isFinite || r0 <= 0.0001) r0 = 1.0;
+
+      // 3) Масштабируем под целевой радиус
+      final s = targetBallRadius / r0;
+      ballTemplate!.scale.setValues(s, s, s);
+
+      // 4) Сохраняем фактический радиус в мире
+      _ballRadius = _computeRadiusWorld(ballTemplate!);
+
+      debugPrint('ball radius after scale = $_ballRadius, scale=$s');
+
+      // 5) Клонируем
+      for (int i = 0; i < ballCount; i++) {
+        final b = ballTemplate!.clone(true);
+        b.frustumCulled = false;
+        threeJs.scene.add(b);
+        balls.add(b);
+      }
+
+      // 6) Равномерно разложить по террейну
+      _scatterBallsUniformOnTerrain();
     }
 
     // Animation
     threeJs.addAnimationEvent((dt) {
       if (airplaneRig == null || airplaneModel == null) return;
 
-      // 1) Update yaw from joystick
+      // 1) yaw from joystick
       yaw += _yawInput * yawRate * dt;
 
-      // 2) Forward vector from yaw (no pitch)
+      // 2) forward vector
       final fx = math.sin(yaw);
       final fz = math.cos(yaw);
       _tmpForward.setValues(fx, 0, fz);
 
-      // 3) Move in heading direction
+      // 3) move forward
       planeX += _tmpForward.x * planeSpeed * dt;
       planeZ += _tmpForward.z * planeSpeed * dt;
 
-      // Wrap into one tile
+      // 4) wrap
       planeX = _wrap(planeX, -terrainW * 0.5, terrainW * 0.5);
       planeZ = _wrap(planeZ, -terrainH * 0.5, terrainH * 0.5);
 
-      // 4) Fixed altitude: move rig
+      // 5) update rig position
       airplaneRig!.position.setValues(planeX, flightY, planeZ);
 
-      // 5) Yaw: rig looks forward [web:16]
+      // 6) rig yaw via lookAt
       _tmpLookAt.setValues(
         planeX + _tmpForward.x * 15.0,
         flightY,
@@ -240,25 +382,53 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
       );
       airplaneRig!.lookAt(_tmpLookAt);
 
-      // 6) Bank animation on model (roll around local Z) after lookAt-style yaw [web:49]
+      // 7) bank on model only
       final targetBank = (-_yawInput * (maxBankDeg * math.pi / 180.0));
       _bank = _lerp(_bank, targetBank, bankSmooth);
       airplaneModel!.rotation.z = _bank;
+
+      // 8) camera follow (manual)
       final lx = _tmpForward.z;
       final lz = -_tmpForward.x;
-      // 7) Camera strictly behind (relative to forward)
+
       threeJs.camera.position.setValues(
         airplaneRig!.position.x - _tmpForward.x * followBack + lx * followLeft,
         airplaneRig!.position.y + followUp,
         airplaneRig!.position.z - _tmpForward.z * followBack + lz * followLeft,
       );
 
-      controls!.target.setValues(
-        airplaneRig!.position.x,
-        airplaneRig!.position.y,
-        airplaneRig!.position.z,
-      );
-      controls!.update();
+      threeJs.camera.lookAt(_tmpLookAt);
+
+      // 9) collectibles: rotate + collision by distance
+      if (balls.isNotEmpty) {
+        int gained = 0;
+
+        for (final b in balls) {
+          b.rotation.y += dt * 0.9;
+
+          // Если хочешь, чтобы шары всегда точно "лежали" над террейном даже после wrap
+          // или если потом начнёшь двигать террейн — можно держать Y актуальным:
+          // b.position.y = terrainHeight(b.position.x, b.position.z) + _ballRadius + ballHover + _groundEps;
+
+          final d = _dist3(
+            airplaneRig!.position.x,
+            airplaneRig!.position.y,
+            airplaneRig!.position.z,
+            b.position.x,
+            b.position.y,
+            b.position.z,
+          );
+
+          if (d <= pickupRadius) {
+            gained += 1;
+            _respawnBall(b);
+          }
+        }
+
+        if (gained != 0) {
+          setState(() => score += gained);
+        }
+      }
     });
   }
 }
