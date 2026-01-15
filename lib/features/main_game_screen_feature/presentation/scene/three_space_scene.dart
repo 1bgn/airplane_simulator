@@ -1,6 +1,7 @@
+import 'dart:async';
 import 'dart:math' as math;
-import 'package:flutter/material.dart';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_joystick/flutter_joystick.dart';
 import 'package:three_js/three_js.dart' as three;
 
@@ -68,6 +69,16 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
   final three.Vector3 _tmpForward = three.Vector3(0, 0, 1);
   final three.Vector3 _tmpLookAt = three.Vector3(0, 0, 0);
 
+  // ===== Challenge: 30 balls / 60 seconds =====
+  static const int goalScore = 10;
+  static const int totalSeconds = 60;
+
+  int timeLeft = totalSeconds;
+  Timer? _gameTimer;
+
+  bool _gameEnded = false;
+  bool _dialogShown = false;
+
   @override
   void initState() {
     super.initState();
@@ -79,6 +90,7 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
 
   @override
   void dispose() {
+    _gameTimer?.cancel();
     threeJs.dispose();
     three.loading.clear();
     super.dispose();
@@ -90,6 +102,8 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
       body: Stack(
         children: [
           threeJs.build(),
+
+          // Score HUD
           Positioned(
             left: 20,
             top: 40,
@@ -97,11 +111,27 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               color: Colors.black54,
               child: Text(
-                'Score: $score',
+                'Score: $score / $goalScore',
                 style: const TextStyle(color: Colors.white, fontSize: 18),
               ),
             ),
           ),
+
+          // Timer HUD
+          Positioned(
+            left: 20,
+            top: 85,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              color: Colors.black54,
+              child: Text(
+                'Time: ${timeLeft.clamp(0, totalSeconds)}s',
+                style: const TextStyle(color: Colors.white, fontSize: 16),
+              ),
+            ),
+          ),
+
+          // Joystick
           Positioned(
             left: 20,
             bottom: 20,
@@ -112,6 +142,10 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
                 mode: JoystickMode.horizontal,
                 period: const Duration(milliseconds: 16),
                 listener: (details) {
+                  if (_gameEnded) {
+                    _yawInput = 0.0;
+                    return;
+                  }
                   _yawInput = -details.x; // [-1..1]
                 },
               ),
@@ -120,6 +154,72 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
         ],
       ),
     );
+  }
+
+  // ===== Timer / Game end =====
+  void _startChallenge() {
+    _gameTimer?.cancel();
+    _gameEnded = false;
+    _dialogShown = false;
+
+    setState(() {
+      score = 0;
+      timeLeft = totalSeconds;
+    });
+
+    // Optional: re-scatter balls on restart
+    _scatterBallsUniformOnTerrain();
+
+    _gameTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted || _gameEnded) return;
+
+      setState(() => timeLeft -= 1);
+
+      if (timeLeft <= 0) {
+        _finishChallenge(won: score >= goalScore);
+      }
+    });
+  }
+
+  void _finishChallenge({required bool won}) {
+    if (_gameEnded) return;
+    _gameEnded = true;
+
+    _gameTimer?.cancel();
+    _gameTimer = null;
+    _yawInput = 0.0;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _dialogShown) return;
+      _dialogShown = true;
+
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) {
+          return AlertDialog(
+            title: Text(won ? 'Победа!' : 'Время вышло'),
+            content: Text(
+              'Собрано: $score / $goalScore\n'
+                  'Осталось времени: ${timeLeft.clamp(0, totalSeconds)} c',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.of(ctx).pop();
+                  _startChallenge();
+                },
+                child: const Text('Заново'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Закрыть'),
+              ),
+            ],
+          );
+        },
+      );
+    });
   }
 
   double terrainHeight(double x, double z) {
@@ -192,7 +292,7 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
   /// Равномерная раскладка по террейну:
   /// - делим тайл на grid-ячейки
   /// - в каждой ячейке берём случайную точку (jitter)
-  /// - ставим шар на высоту террейна + radius + hover
+  /// - ставим шар на высоту полёта (как самолёт), но только если он не пересечёт террейн
   void _scatterBallsUniformOnTerrain() {
     if (balls.isEmpty) return;
 
@@ -208,7 +308,6 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
         final xCenter = -terrainW * 0.5 + (c + 0.5) * cellW;
         final zCenter = -terrainH * 0.5 + (r + 0.5) * cellH;
 
-        // пробуем несколько раз найти XZ в этой ячейке, где шар не пересечёт террейн
         double x = xCenter;
         double z = zCenter;
 
@@ -226,14 +325,12 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
           }
         }
 
-        // если в этой ячейке террейн слишком высокий — оставим точку (можно и пропускать/переносить)
         if (!ok) {
           x = xCenter;
           z = zCenter;
         }
 
-        // ВАЖНО: Y совпадает с самолётом
-        final y = flightY;
+        final y = flightY; // Y совпадает с самолётом
         balls[i].position.setValues(x, y, z);
         i++;
       }
@@ -255,6 +352,7 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
 
     double x = 0.0;
     double z = 0.0;
+    bool found = false;
 
     for (int t = 0; t < tries; t++) {
       final rx = _rand(-terrainW * 0.5, terrainW * 0.5);
@@ -267,13 +365,18 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
 
       x = rx;
       z = rz;
+      found = true;
       break;
     }
 
-    // ВАЖНО: Y совпадает с самолётом
+    if (!found) {
+      // fallback — просто куда-то в тайл
+      x = _rand(-terrainW * 0.5, terrainW * 0.5);
+      z = _rand(-terrainH * 0.5, terrainH * 0.5);
+    }
+
     b.position.setValues(x, flightY, z);
   }
-
 
   Future<void> setup() async {
     // Camera
@@ -307,6 +410,7 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     final airplaneGltf = await loader.fromAsset('airplane.glb');
     airplaneModel = airplaneGltf?.scene;
     const offsetDeg = 13.0;
+
     if (airplaneModel != null) {
       airplaneModel!.scale.setValues(0.35, 0.35, 0.35);
       airplaneModel!.rotation.y = offsetDeg * math.pi / 180.0;
@@ -324,23 +428,23 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     ballTemplate = ballGltf?.scene;
 
     if (ballTemplate != null) {
-      // 1) Сброс scale, чтобы измерить "нативный" радиус
+      // 1) reset scale, to measure "native" radius
       ballTemplate!.scale.setValues(1.0, 1.0, 1.0);
 
-      // 2) Измеряем текущий радиус
+      // 2) measure current radius
       var r0 = _computeRadiusWorld(ballTemplate!);
       if (!r0.isFinite || r0 <= 0.0001) r0 = 1.0;
 
-      // 3) Масштабируем под целевой радиус
+      // 3) scale to target radius
       final s = targetBallRadius / r0;
       ballTemplate!.scale.setValues(s, s, s);
 
-      // 4) Сохраняем фактический радиус в мире
+      // 4) store real world radius after scaling
       _ballRadius = _computeRadiusWorld(ballTemplate!);
 
       debugPrint('ball radius after scale = $_ballRadius, scale=$s');
 
-      // 5) Клонируем
+      // 5) clone
       for (int i = 0; i < ballCount; i++) {
         final b = ballTemplate!.clone(true);
         b.frustumCulled = false;
@@ -348,13 +452,17 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
         balls.add(b);
       }
 
-      // 6) Равномерно разложить по террейну
+      // 6) scatter on terrain
       _scatterBallsUniformOnTerrain();
     }
+
+    // Start challenge AFTER scene is ready
+    _startChallenge();
 
     // Animation
     threeJs.addAnimationEvent((dt) {
       if (airplaneRig == null || airplaneModel == null) return;
+      if (_gameEnded) return;
 
       // 1) yaw from joystick
       yaw += _yawInput * yawRate * dt;
@@ -397,7 +505,6 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
         airplaneRig!.position.y + followUp,
         airplaneRig!.position.z - _tmpForward.z * followBack + lz * followLeft,
       );
-
       threeJs.camera.lookAt(_tmpLookAt);
 
       // 9) collectibles: rotate + collision by distance
@@ -406,10 +513,6 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
 
         for (final b in balls) {
           b.rotation.y += dt * 0.9;
-
-          // Если хочешь, чтобы шары всегда точно "лежали" над террейном даже после wrap
-          // или если потом начнёшь двигать террейн — можно держать Y актуальным:
-          // b.position.y = terrainHeight(b.position.x, b.position.z) + _ballRadius + ballHover + _groundEps;
 
           final d = _dist3(
             airplaneRig!.position.x,
@@ -428,6 +531,10 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
 
         if (gained != 0) {
           setState(() => score += gained);
+
+          if (score >= goalScore) {
+            _finishChallenge(won: true);
+          }
         }
       }
     });
