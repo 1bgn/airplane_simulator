@@ -1,8 +1,9 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
+import 'package:flutter_joystick/flutter_joystick.dart';
 import 'package:three_js/three_js.dart' as three;
-import 'package:three_js_controls/three_js_controls.dart';
+import 'package:three_js_controls/three_js_controls.dart' hide Joystick;
 
 class ThreeSpaceScene extends StatefulWidget {
   const ThreeSpaceScene({super.key});
@@ -15,8 +16,11 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
   late three.ThreeJS threeJs;
   OrbitControls? controls;
 
-  three.Object3D? airplane;
   three.Mesh? terrain;
+
+  // New: container + model (to separate yaw vs roll)
+  three.Object3D? airplaneRig;
+  three.Object3D? airplaneModel;
 
   // Terrain params
   final double terrainW = 2000.0;
@@ -24,19 +28,36 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
   final int terrainSegW = 240;
   final int terrainSegH = 240;
 
-  // Flight (straight line)
+  // Flight
   double planeX = 0.0;
   double planeZ = -800.0;
-  final double planeSpeed = 120.0; // world units per second
 
-  // IMPORTANT: fixed flight altitude (no "bobbing")
+  // Fixed altitude (no bobbing)
   final double flightY = 60.0;
 
-  // Camera: strictly behind
+  // Speed
+  final double planeSpeed = 120.0;
+
+  // Heading (yaw) radians, 0 => +Z
+  double yaw = 0.0;
+
+  // Joystick input (-1..1)
+  double _yawInput = 0.0;
+
+  // Turn rate (rad/s at full deflection)
+  final double yawRate = 1.4;
+
+  // Bank (roll) animation
+  final double maxBankDeg = 18.0;     // max tilt
+  final double bankSmooth = 0.12;     // 0..1 per frame-like smoothing
+  double _bank = 0.0;                // current bank angle (rad)
+
+  // Camera: strictly behind current forward vector
   final double followBack = 110.0;
   final double followUp = 35.0;
 
   // temps
+  final three.Vector3 _tmpForward = three.Vector3(0, 0, 1);
   final three.Vector3 _tmpLookAt = three.Vector3(0, 0, 0);
 
   @override
@@ -57,9 +78,31 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(body: threeJs.build());
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Stack(
+        children: [
+          threeJs.build(),
+          Positioned(
+            left: 20,
+            bottom: 20,
+            child: SizedBox(
+              width: 140,
+              height: 140,
+              child: Joystick(
+                mode: JoystickMode.horizontal,
+                period: const Duration(milliseconds: 16),
+                listener: (details) {
+                  _yawInput = -details.x; // [-1..1]
+                },
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
-  // One function for both mesh generation and any sampling if needed later
   double terrainHeight(double x, double z) {
     final h1 = 18.0 * math.sin(x * 0.010) * math.cos(z * 0.010);
     final h2 = 8.0 * math.sin(x * 0.035 + 1.7) * math.cos(z * 0.030 - 0.6);
@@ -70,9 +113,7 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     final geo = three.PlaneGeometry(terrainW, terrainH, terrainSegW, terrainSegH);
     geo.rotateX(-math.pi / 2);
 
-    // NOTE: three_js uses Attribute.position (not 'position')
-    final pos =
-    geo.getAttribute(three.Attribute.position) as three.BufferAttribute;
+    final pos = geo.getAttribute(three.Attribute.position) as three.BufferAttribute;
 
     for (int i = 0; i < pos.count; i++) {
       final x = (pos.getX(i) ?? 0).toDouble();
@@ -94,6 +135,16 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     return mesh;
   }
 
+  double _wrap(double v, double min, double max) {
+    final range = max - min;
+    if (range <= 0) return min;
+    while (v < min) v += range;
+    while (v > max) v -= range;
+    return v;
+  }
+
+  double _lerp(double a, double b, double t) => a + (b - a) * t;
+
   Future<void> setup() async {
     // Camera
     threeJs.camera = three.PerspectiveCamera(
@@ -102,14 +153,13 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
       0.1,
       8000,
     );
-    threeJs.camera.position.setValues(0, flightY + followUp, planeZ - followBack);
     threeJs.camera.up.setValues(0, 1, 0);
 
     // Scene
     threeJs.scene = three.Scene();
     threeJs.scene.background = three.Color.fromHex32(0x87B6FF);
 
-    // Controls: locked (camera is fully driven by code)
+    // Controls: locked (camera fully driven by code)
     controls = OrbitControls(threeJs.camera, threeJs.globalKey)
       ..enableDamping = false
       ..enableRotate = false
@@ -126,50 +176,74 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     terrain = buildTerrain();
     threeJs.scene.add(terrain!);
 
-    // Airplane
+    // Airplane: rig + model
+    airplaneRig = three.Object3D();
+    threeJs.scene.add(airplaneRig!);
+
     final loader = three.GLTFLoader(flipY: true).setPath('assets/3d_models/');
     final airplaneGltf = await loader.fromAsset('airplane.glb');
-    airplane = airplaneGltf?.scene;
+    airplaneModel = airplaneGltf?.scene;
 
-    if (airplane != null) {
-      airplane!.scale.setValues(0.35, 0.35, 0.35);
-      threeJs.scene.add(airplane!);
+    if (airplaneModel != null) {
+      airplaneModel!.scale.setValues(0.35, 0.35, 0.35);
 
-      airplane!.position.setValues(planeX, flightY, planeZ);
-      airplane!.lookAt(three.Vector3(planeX, flightY, planeZ + 10.0));
+      // IMPORTANT: model is child, so we can roll it without breaking yaw from rig
+      airplaneRig!.add(airplaneModel!);
+
+      airplaneRig!.position.setValues(planeX, flightY, planeZ);
+
+      // initial yaw via lookAt (rig only) [web:16]
+      _tmpLookAt.setValues(planeX, flightY, planeZ + 10.0);
+      airplaneRig!.lookAt(_tmpLookAt);
     }
 
     // Animation
     threeJs.addAnimationEvent((dt) {
-      if (airplane == null) return;
+      if (airplaneRig == null || airplaneModel == null) return;
 
-      // Move straight along +Z
-      planeZ += planeSpeed * dt;
+      // 1) Update yaw from joystick
+      yaw += _yawInput * yawRate * dt;
 
-      // Simple wrap (keeps you inside the same terrain tile)
-      if (planeZ > terrainH * 0.5) {
-        planeZ = -terrainH * 0.5;
-      }
+      // 2) Forward vector from yaw (no pitch)
+      final fx = math.sin(yaw);
+      final fz = math.cos(yaw);
+      _tmpForward.setValues(fx, 0, fz);
 
-      // Fixed height: NO terrain sampling here
-      airplane!.position.setValues(planeX, flightY, planeZ);
+      // 3) Move in heading direction
+      planeX += _tmpForward.x * planeSpeed * dt;
+      planeZ += _tmpForward.z * planeSpeed * dt;
 
-      // Fixed forward orientation (+Z): NO pitch/roll from terrain
-      _tmpLookAt.setValues(planeX, flightY, planeZ + 15.0);
-      airplane!.lookAt(_tmpLookAt);
+      // Wrap into one tile
+      planeX = _wrap(planeX, -terrainW * 0.5, terrainW * 0.5);
+      planeZ = _wrap(planeZ, -terrainH * 0.5, terrainH * 0.5);
 
-      // Camera strictly behind (no smoothing)
+      // 4) Fixed altitude: move rig
+      airplaneRig!.position.setValues(planeX, flightY, planeZ);
+
+      // 5) Yaw: rig looks forward [web:16]
+      _tmpLookAt.setValues(
+        planeX + _tmpForward.x * 15.0,
+        flightY,
+        planeZ + _tmpForward.z * 15.0,
+      );
+      airplaneRig!.lookAt(_tmpLookAt);
+
+      // 6) Bank animation on model (roll around local Z) after lookAt-style yaw [web:49]
+      final targetBank = (-_yawInput * (maxBankDeg * math.pi / 180.0));
+      _bank = _lerp(_bank, targetBank, bankSmooth);
+      airplaneModel!.rotation.z = _bank;
+
+      // 7) Camera strictly behind (relative to forward)
       threeJs.camera.position.setValues(
-        airplane!.position.x,
-        airplane!.position.y + followUp,
-        airplane!.position.z - followBack,
+        airplaneRig!.position.x - _tmpForward.x * followBack,
+        airplaneRig!.position.y + followUp,
+        airplaneRig!.position.z - _tmpForward.z * followBack,
       );
 
-      // Look at airplane via OrbitControls target
       controls!.target.setValues(
-        airplane!.position.x,
-        airplane!.position.y,
-        airplane!.position.z,
+        airplaneRig!.position.x,
+        airplaneRig!.position.y,
+        airplaneRig!.position.z,
       );
       controls!.update();
     });
