@@ -1,31 +1,15 @@
+import 'package:aircraft_simulator/core/di/init_di.dart';
+import 'package:aircraft_simulator/features/main_game_screen_feature/presentation/bloc/main_game_bloc.dart';
+import 'package:aircraft_simulator/features/main_game_screen_feature/presentation/views/main_game_view.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_3d_controller/flutter_3d_controller.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 
-class MainGameScreen extends StatefulWidget {
-  @override
-  State<MainGameScreen> createState() => _MainGameScreenState();
-}
-
-class _MainGameScreenState extends State<MainGameScreen> {
-  Flutter3DController controller = Flutter3DController();
-
-  @override
-  void initState() {
-    super.initState();
-    controller.onModelLoaded.addListener(() {
-      print('model is loaded : ${controller.onModelLoaded.value}');
-    });
-  }
-
+class MainGameScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: Flutter3DViewer(
-          src: "assets/3d_models/airplane.glb",
-          controller: controller,
-        ),
-      ),
+    return BlocProvider(
+      create: (BuildContext context) => getIt<MainGameBloc>(),
+      child: MainGameView(),
     );
   }
 }
