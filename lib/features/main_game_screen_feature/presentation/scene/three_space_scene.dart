@@ -43,7 +43,7 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
   // Camera follow
   final double followBack = 110.0;
   final double followUp = 35.0;
-  final double followLeft = 28.0;
+  final double followLeft = 8.0;
 
   // Bank animation
   final double maxBankDeg = 18.0;
@@ -280,8 +280,8 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     threeJs.camera = three.PerspectiveCamera(
       60,
       threeJs.width / threeJs.height,
-      0.1,
-      8000,
+      1,
+      4000,
     );
     threeJs.camera.up.setValues(0, 1, 0);
 
@@ -306,9 +306,10 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     final loader = three.GLTFLoader(flipY: true).setPath('assets/3d_models/');
     final airplaneGltf = await loader.fromAsset('airplane.glb');
     airplaneModel = airplaneGltf?.scene;
-
+    const offsetDeg = 13.0;
     if (airplaneModel != null) {
       airplaneModel!.scale.setValues(0.35, 0.35, 0.35);
+      airplaneModel!.rotation.y = offsetDeg * math.pi / 180.0;
       airplaneRig!.add(airplaneModel!);
 
       airplaneRig!.position.setValues(planeX, flightY, planeZ);
