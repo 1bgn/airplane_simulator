@@ -8,6 +8,7 @@ class MainGameScreen extends StatefulWidget {
 
 class _MainGameScreenState extends State<MainGameScreen> {
   Flutter3DController controller = Flutter3DController();
+
   @override
   void initState() {
     super.initState();
@@ -15,13 +16,14 @@ class _MainGameScreenState extends State<MainGameScreen> {
       print('model is loaded : ${controller.onModelLoaded.value}');
     });
   }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(
         child: Flutter3DViewer(
           src: "assets/3d_models/airplane.glb",
-
+          controller: controller,
         ),
       ),
     );
