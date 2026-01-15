@@ -15,7 +15,7 @@ class _EarthSceneState extends State<EarthScene> {
   void initState() {
     super.initState();
     controller.onModelLoaded.addListener(() {
-      controller.startRotation(rotationSpeed: 2);
+      // controller.startRotation(rotationSpeed: );
       controller.setCameraOrbit(20, 20, 1.5);
 
 
