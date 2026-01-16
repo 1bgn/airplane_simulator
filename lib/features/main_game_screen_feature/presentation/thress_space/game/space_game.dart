@@ -27,6 +27,7 @@ class SpaceGame {
 
   three.Object3D? _ballTemplate;
   final List<three.Object3D> _balls = [];
+  bool recordTrajectory = true;
 
   // Terrain params
   final double terrainW = 2000.0;
@@ -250,6 +251,12 @@ class SpaceGame {
       _airplaneRig!.position.z - _tmpForward.z * followBack + lz * followLeft,
     );
     _threeJs.camera.lookAt(_tmpLookAt);
+    // 8.5) record trajectory
+    if (recordTrajectory) {
+
+
+        state.trajectory.add(three.Vector3(planeX, flightY, planeZ));
+    }
 
     // 9) collectibles: rotate + collision
     if (_balls.isNotEmpty) {

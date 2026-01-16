@@ -1,3 +1,4 @@
+import 'package:aircraft_simulator/core/routes/app_router.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_joystick/flutter_joystick.dart';
 import 'package:three_js/three_js.dart' as three;
@@ -24,7 +25,7 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     super.initState();
 
     _state = SpaceGameState(
-      goalScore: 10,
+      goalScore: 1,
       totalSeconds: 60,
     );
 
@@ -51,44 +52,45 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
   }
 
   void _onGameOver({required bool won}) {
-    if (!mounted || _dialogShown) return;
-    _dialogShown = true;
-
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) {
-        return AnimatedBuilder(
-          animation: _state,
-          builder: (_, __) {
-            return AlertDialog(
-              title: Text(won ? 'Победа!' : 'Время вышло'),
-              content: Text(
-                'Собрано: ${_state.score} / ${_state.goalScore}\n'
-                    'Осталось времени: ${_state.timeLeft.clamp(0, _state.totalSeconds)} c',
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () {
-                    Navigator.of(ctx).pop();
-                    _dialogShown = false;
-                    _game.restart();
-                  },
-                  child: const Text('Заново'),
-                ),
-                TextButton(
-                  onPressed: () {
-                    Navigator.of(ctx).pop();
-                    _dialogShown = false;
-                  },
-                  child: const Text('Закрыть'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
+    Navigator.pushReplacementNamed(context, AppRouter.resultRoute,arguments: {'time':_state.timeLeft,'trajectory':_state.trajectory,'goalScore':_state.goalScore,'score':_state.score,'isWon':won});
+    // if (!mounted || _dialogShown) return;
+    // _dialogShown = true;
+    //
+    // showDialog<void>(
+    //   context: context,
+    //   barrierDismissible: false,
+    //   builder: (ctx) {
+    //     return AnimatedBuilder(
+    //       animation: _state,
+    //       builder: (_, __) {
+    //         return AlertDialog(
+    //           title: Text(won ? 'Победа!' : 'Время вышло'),
+    //           content: Text(
+    //             'Собрано: ${_state.score} / ${_state.goalScore}\n'
+    //                 'Осталось времени: ${_state.timeLeft} c',
+    //           ),
+    //           actions: [
+    //             TextButton(
+    //               onPressed: () {
+    //                 Navigator.of(ctx).pop();
+    //                 _dialogShown = false;
+    //                 _game.restart();
+    //               },
+    //               child: const Text('Заново'),
+    //             ),
+    //             TextButton(
+    //               onPressed: () {
+    //                 Navigator.of(ctx).pop();
+    //                 _dialogShown = false;
+    //               },
+    //               child: const Text('Закрыть'),
+    //             ),
+    //           ],
+    //         );
+    //       },
+    //     );
+    //   },
+    // );
   }
 
   @override

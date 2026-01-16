@@ -1,3 +1,4 @@
+import 'package:aircraft_simulator/core/routes/app_router.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_3d_controller/flutter_3d_controller.dart';
@@ -68,7 +69,7 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
                     width: 220,
                     child: ElevatedButton(
                       style:      ElevatedButton.styleFrom(backgroundColor: Colors.green,foregroundColor: Colors.white)  ,
-                      onPressed: () => Navigator.pushNamed(context, '/game'),
+                      onPressed: () => Navigator.pushNamed(context, AppRouter.gameRoute),
                       child: const Text('Начать игру'),
                     ),
                   ),

@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:three_js/three_js.dart' as three;
 
 class SpaceGameState extends ChangeNotifier {
   SpaceGameState({
@@ -8,6 +9,8 @@ class SpaceGameState extends ChangeNotifier {
 
   final int goalScore;
   final int totalSeconds;
+  final List<three.Vector3> trajectory = [];
+
 
   int score = 0;
   int timeLeft;
