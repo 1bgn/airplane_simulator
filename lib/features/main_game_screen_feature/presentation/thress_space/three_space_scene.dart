@@ -98,59 +98,69 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
         children: [
           _threeJs.build(),
 
-          // HUD
-          Positioned(
-            left: 20,
-            top: 40,
-            child: AnimatedBuilder(
-              animation: _state,
-              builder: (_, __) {
-                return Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  color: Colors.black54,
-                  child: Text(
-                    'Score: ${_state.score} / ${_state.goalScore}',
-                    style: const TextStyle(color: Colors.white, fontSize: 18),
-                  ),
-                );
-              },
-            ),
-          ),
-
-          Positioned(
-            left: 20,
-            top: 85,
-            child: AnimatedBuilder(
-              animation: _state,
-              builder: (_, __) {
-                return Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  color: Colors.black54,
-                  child: Text(
-                    'Time: ${_state.timeLeft.clamp(0, _state.totalSeconds)}s',
-                    style: const TextStyle(color: Colors.white, fontSize: 16),
-                  ),
-                );
-              },
-            ),
-          ),
-
-          // Joystick
-          Positioned(
-            left: 20,
-            bottom: 20,
-            child: SizedBox(
-              width: 140,
-              height: 140,
-              child: Joystick(
-                mode: JoystickMode.horizontal,
-                period: const Duration(milliseconds: 16),
-                listener: (details) {
-                  _game.setYawInput(-details.x);
+          Positioned(child: SafeArea(
+            child: Stack(children: [Positioned(
+              left: 20,
+              top: 20,
+              child: AnimatedBuilder(
+                animation: _state,
+                builder: (_, __) {
+                  return Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    color: Colors.black54,
+                    child: Text(
+                      'Счет: ${_state.score} / ${_state.goalScore}',
+                      style: const TextStyle(color: Colors.white, fontSize: 18),
+                    ),
+                  );
                 },
               ),
             ),
-          ),
+            
+              Positioned(
+                left: 20,
+                top: 65,
+                child: AnimatedBuilder(
+                  animation: _state,
+                  builder: (_, __) {
+                    return Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      color: Colors.black54,
+                      child: Text(
+                        'Осталось: ${_state.timeLeft.clamp(0, _state.totalSeconds)}s',
+                        style: const TextStyle(color: Colors.white, fontSize: 16),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              Positioned(
+            
+                child: Align(child: InkWell(
+                  onTap: ()=>Navigator.pop(context),
+                  child: Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Icon(Icons.clear),
+                  ),
+                ),alignment: Alignment.topRight),),
+            
+              // Joystick
+              Positioned(
+                left: 20,
+                bottom: 20,
+                child: SizedBox(
+                  width: 140,
+                  height: 140,
+                  child: Joystick(
+                    mode: JoystickMode.horizontal,
+                    period: const Duration(milliseconds: 16),
+                    listener: (details) {
+                      _game.setYawInput(-details.x);
+                    },
+                  ),
+                ),
+              ),],),
+          ))
         ],
       ),
     );
