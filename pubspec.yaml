@@ -42,7 +42,7 @@ dev_dependencies:
   json_serializable: any
   injectable_generator: any
   flutter_launcher_icons: ^0.14.4
-
+  shared_preferences: ^2.5.4
   flutter_lints: ^5.0.0
 
 
