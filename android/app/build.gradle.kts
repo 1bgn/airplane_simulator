@@ -8,7 +8,7 @@ plugins {
 android {
     namespace = "com.b7am.aircraft_simulator"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
