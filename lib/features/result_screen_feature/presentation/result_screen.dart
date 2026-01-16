@@ -1,7 +1,9 @@
 import 'dart:math' as math;
 
 import 'package:aircraft_simulator/core/routes/app_router.dart';
+import 'package:aircraft_simulator/features/result_screen_feature/presentation/bloc/result_screen_bloc.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:three_js/three_js.dart' as three;
 
 class ResultScreen extends StatelessWidget {
@@ -47,7 +49,8 @@ class ResultScreen extends StatelessWidget {
                     ),
                   ),
                 MaterialButton(color: Colors.green,onPressed: (){
-
+                  final bloc = context.read<ResultScreenBloc>();
+                  bloc.add(ResultEvent.saveMoney(money: wonMoney));
                   Navigator.pushReplacementNamed(context, AppRouter.getInitialRoute());
                 },child: Text("Завершить",style: TextStyle(color: Colors.white),),)
               ],

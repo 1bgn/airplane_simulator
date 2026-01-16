@@ -3,9 +3,13 @@ import 'package:aircraft_simulator/features/main_game_screen_feature/presentatio
 import 'package:flutter/material.dart';
 
 import 'core/routes/app_router.dart';
+import 'core/storage/shared_prefs_service.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
   configureDependencies();
+  await SharedPrefsService.init();
   runApp(const MyApp());
 }
 
@@ -14,12 +18,15 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+
     return MaterialApp(
       title: 'Subscription App',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         primarySwatch: Colors.blue,
         scaffoldBackgroundColor: Colors.white,
+        cardColor: Colors.white,
+
         useMaterial3: true,
       ),
       onGenerateRoute: AppRouter.generateRoute,

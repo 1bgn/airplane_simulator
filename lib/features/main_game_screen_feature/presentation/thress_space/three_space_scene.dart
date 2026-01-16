@@ -25,7 +25,7 @@ class _ThreeSpaceSceneState extends State<ThreeSpaceScene> {
     super.initState();
 
     _state = SpaceGameState(
-      goalScore: 1,
+      goalScore: 5,
       totalSeconds: 60,
     );
 
